@@ -6,3 +6,7 @@
 ## 目标
 - 提升 Pulsar 代码的可读性和可维护性
 - 鼓励社区贡献，共同完善注释内容
+
+## 进度
+### Pulsar客户端
+#### PulsarClientImpl
