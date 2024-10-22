@@ -101,51 +101,79 @@ import org.slf4j.LoggerFactory;
 
 public class PulsarClientImpl implements PulsarClient {
 
+    // 日志记录器，用于记录日志信息
     private static final Logger log = LoggerFactory.getLogger(PulsarClientImpl.class);
+    // 关闭超时时间，单位为秒
     private static final int CLOSE_TIMEOUT_SECONDS = 60;
+    // 消费者接收队列大小缩减的阈值
     private static final double THRESHOLD_FOR_CONSUMER_RECEIVER_QUEUE_SIZE_SHRINKING = 0.95;
 
-    // default limits for producers when memory limit controller is disabled
+    // 当内存限制控制器被禁用时，生产者的默认限制
     private static final int NO_MEMORY_LIMIT_DEFAULT_MAX_PENDING_MESSAGES = 1000;
     private static final int NO_MEMORY_LIMIT_DEFAULT_MAX_PENDING_MESSAGES_ACROSS_PARTITIONS = 50000;
 
+    // 客户端配置数据
     protected final ClientConfigurationData conf;
+    // 标识是否创建了执行器提供者
     private final boolean createdExecutorProviders;
 
+    // 标识是否创建了计划任务提供者
     private final boolean createdScheduledProviders;
+    // 标识是否创建了查找提供者
     private final boolean createdLookupProviders;
+    // 查找服务
     private LookupService lookup;
+    // URL查找映射表
     private Map<String, LookupService> urlLookupMap = new ConcurrentHashMap<>();
+    // 连接池
     private final ConnectionPool cnxPool;
+    // 计时器
     @Getter
     private final Timer timer;
+    // 标识是否需要停止计时器
     private boolean needStopTimer;
+    // 外部执行器提供者
     private final ExecutorProvider externalExecutorProvider;
+    // 内部执行器提供者
     private final ExecutorProvider internalExecutorProvider;
+    // 查找执行器提供者
     private final ExecutorProvider lookupExecutorProvider;
 
+    // 计划任务执行器提供者
     private final ScheduledExecutorProvider scheduledExecutorProvider;
+    // 标识是否创建了事件循环组
     private final boolean createdEventLoopGroup;
+    // 标识是否创建了连接池
     private final boolean createdCnxPool;
 
+    // 客户端状态枚举
     public enum State {
         Open, Closing, Closed
     }
 
+    // 客户端状态，使用原子引用进行线程安全操作
     private final AtomicReference<State> state = new AtomicReference<>();
-    // These sets are updated from multiple threads, so they require a threadsafe data structure
+    // 生产者集合，使用线程安全的数据结构
     private final Set<ProducerBase<?>> producers = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    // 消费者集合，使用线程安全的数据结构
     private final Set<ConsumerBase<?>> consumers = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
+    // 生产者ID生成器，使用原子长整型进行线程安全操作
     private final AtomicLong producerIdGenerator = new AtomicLong();
+    // 消费者ID生成器，使用原子长整型进行线程安全操作
     private final AtomicLong consumerIdGenerator = new AtomicLong();
+    // 主题列表观察者ID生成器，使用原子长整型进行线程安全操作
     private final AtomicLong topicListWatcherIdGenerator = new AtomicLong();
+    // 请求ID生成器，使用原子长整型进行线程安全操作，初始值为随机
     private final AtomicLong requestIdGenerator =
             new AtomicLong(ThreadLocalRandom.current().nextLong(0, Long.MAX_VALUE / 2));
 
+    // 事件循环组
     protected final EventLoopGroup eventLoopGroup;
+    // 内存限制控制器
     private final MemoryLimitController memoryLimitController;
 
+    // Schema信息提供者的加载缓存
     private final LoadingCache<String, SchemaInfoProvider> schemaProviderLoadingCache =
             CacheBuilder.newBuilder().maximumSize(100000)
                     .expireAfterAccess(30, TimeUnit.MINUTES)
@@ -157,10 +185,13 @@ public class PulsarClientImpl implements PulsarClient {
                         }
                     });
 
+    // 客户端时钟
     private final Clock clientClock;
 
+    // 仪器提供者
     private final InstrumentProvider instrumentProvider;
 
+    // 事务协调器客户端实现
     @Getter
     private TransactionCoordinatorClientImpl tcClient;
 
@@ -177,10 +208,10 @@ public class PulsarClientImpl implements PulsarClient {
         this(conf, eventLoopGroup, cnxPool, null, null, null, null, null);
     }
 
-    public PulsarClientImpl(ClientConfigurationData conf, EventLoopGroup eventLoopGroup, ConnectionPool cnxPool,
+    public PulsarClientImpl(ClientConfigurationData conf, EventLoopGroup eventLoopGroup, ConnectionPool connectionPool,
                             Timer timer)
             throws PulsarClientException {
-        this(conf, eventLoopGroup, cnxPool, timer, null, null, null, null);
+        this(conf, eventLoopGroup, connectionPool, timer, null, null, null, null);
     }
 
     public PulsarClientImpl(ClientConfigurationData conf, EventLoopGroup eventLoopGroup, ConnectionPool connectionPool,
@@ -199,40 +230,59 @@ public class PulsarClientImpl implements PulsarClient {
                              ScheduledExecutorProvider scheduledExecutorProvider,
                              ExecutorProvider lookupExecutorProvider) throws PulsarClientException {
 
+        // 用于引用事件循环组
         EventLoopGroup eventLoopGroupReference = null;
+        // 用于引用连接池
         ConnectionPool connectionPoolReference = null;
         try {
+            // 判断是否需要创建事件循环组
             this.createdEventLoopGroup = eventLoopGroup == null;
+            // 判断是否需要创建连接池
             this.createdCnxPool = connectionPool == null;
+            // 检查外部和内部执行器提供者是否同时指定或未指定
             if ((externalExecutorProvider == null) != (internalExecutorProvider == null)) {
                 throw new IllegalArgumentException(
                         "Both externalExecutorProvider and internalExecutorProvider must be specified or unspecified.");
             }
+            // 判断是否需要创建执行器提供者
             this.createdExecutorProviders = externalExecutorProvider == null;
+            // 判断是否需要创建计划任务提供者
             this.createdScheduledProviders = scheduledExecutorProvider == null;
+            // 判断是否需要创建查找提供者
             this.createdLookupProviders = lookupExecutorProvider == null;
+            // 获取事件循环组
             eventLoopGroupReference = eventLoopGroup != null ? eventLoopGroup : getEventLoopGroup(conf);
             this.eventLoopGroup = eventLoopGroupReference;
+            // 检查客户端配置是否有效
             if (conf == null || isBlank(conf.getServiceUrl())) {
                 throw new PulsarClientException.InvalidConfigurationException("Invalid client configuration");
             }
             this.conf = conf;
+            // 初始化仪器提供者
             this.instrumentProvider = new InstrumentProvider(conf.getOpenTelemetry());
+            // 获取客户端时钟
             clientClock = conf.getClock();
+            // 启动认证
             conf.getAuthentication().start();
+            // 初始化计划任务执行器提供者
             this.scheduledExecutorProvider = scheduledExecutorProvider != null ? scheduledExecutorProvider :
                     new ScheduledExecutorProvider(conf.getNumIoThreads(), "pulsar-client-scheduled");
+            // 初始化连接池
             connectionPoolReference =
                     connectionPool != null ? connectionPool :
                             new ConnectionPool(instrumentProvider, conf, this.eventLoopGroup,
                                     (ScheduledExecutorService) this.scheduledExecutorProvider.getExecutor());
             this.cnxPool = connectionPoolReference;
+            // 初始化外部执行器提供者
             this.externalExecutorProvider = externalExecutorProvider != null ? externalExecutorProvider :
                     new ExecutorProvider(conf.getNumListenerThreads(), "pulsar-external-listener");
+            // 初始化内部执行器提供者
             this.internalExecutorProvider = internalExecutorProvider != null ? internalExecutorProvider :
                     new ExecutorProvider(conf.getNumIoThreads(), "pulsar-client-internal");
+            // 初始化查找执行器提供者
             this.lookupExecutorProvider = lookupExecutorProvider != null ? lookupExecutorProvider :
                     new ExecutorProvider(1, "pulsar-client-lookup");
+            // 根据服务URL初始化查找服务
             if (conf.getServiceUrl().startsWith("http")) {
                 lookup = new HttpLookupService(instrumentProvider, conf, this.eventLoopGroup);
             } else {
@@ -240,6 +290,7 @@ public class PulsarClientImpl implements PulsarClient {
                         conf.isUseTls(), this.scheduledExecutorProvider.getExecutor(),
                         this.lookupExecutorProvider.getExecutor());
             }
+            // 初始化计时器
             if (timer == null) {
                 this.timer = new HashedWheelTimer(getThreadFactory("pulsar-timer"), 1, TimeUnit.MILLISECONDS);
                 needStopTimer = true;
@@ -247,6 +298,7 @@ public class PulsarClientImpl implements PulsarClient {
                 this.timer = timer;
             }
 
+            // 如果启用了事务，则初始化事务协调器客户端
             if (conf.isEnableTransaction()) {
                 tcClient = new TransactionCoordinatorClientImpl(this);
                 try {
@@ -257,11 +309,14 @@ public class PulsarClientImpl implements PulsarClient {
                 }
             }
 
+            // 初始化内存限制控制器
             memoryLimitController = new MemoryLimitController(conf.getMemoryLimitBytes(),
                     (long) (conf.getMemoryLimitBytes() * THRESHOLD_FOR_CONSUMER_RECEIVER_QUEUE_SIZE_SHRINKING),
                     this::reduceConsumerReceiverQueueSize);
+            // 设置客户端状态为开
             state.set(State.Open);
         } catch (Throwable t) {
+            // 如果初始化失败，进行清理操作
             shutdown();
             shutdownEventLoopGroup(eventLoopGroupReference);
             closeCnxPool(connectionPoolReference);
@@ -294,13 +349,19 @@ public class PulsarClientImpl implements PulsarClient {
 
     @Override
     public <T> ProducerBuilder<T> newProducer(Schema<T> schema) {
+        // 创建一个新的生产者构建器实例，传入当前客户端实例和指定的模式
         ProducerBuilderImpl<T> producerBuilder = new ProducerBuilderImpl<>(this, schema);
+        
+        // 检查内存限制控制器是否启用内存限制
         if (!memoryLimitController.isMemoryLimited()) {
-            // set default limits for producers when memory limit controller is disabled
+            // 如果内存限制控制器未启用，则为生产者设置默认的最大待处理消息限制
             producerBuilder.maxPendingMessages(NO_MEMORY_LIMIT_DEFAULT_MAX_PENDING_MESSAGES);
+            // 设置跨分区的最大待处理消息限制
             producerBuilder.maxPendingMessagesAcrossPartitions(
                     NO_MEMORY_LIMIT_DEFAULT_MAX_PENDING_MESSAGES_ACROSS_PARTITIONS);
         }
+        
+        // 返回配置好的生产者构建器
         return producerBuilder;
     }
 
@@ -404,25 +465,33 @@ public class PulsarClientImpl implements PulsarClient {
 
     private CompletableFuture<Integer> checkPartitions(String topic, boolean forceNoPartitioned,
                                                        @Nullable String producerNameForLog) {
+        // 创建一个 CompletableFuture 对象，用于异步返回分区数量
         CompletableFuture<Integer> checkPartitions = new CompletableFuture<>();
+        
+        // 获取主题的分区元数据
         getPartitionedTopicMetadata(topic, !forceNoPartitioned, true).thenAccept(metadata -> {
+            // 如果强制不支持分区且主题有多个分区，抛出异常
             if (forceNoPartitioned && metadata.partitions > 0) {
                 String errorMsg = String.format("Can not create the producer[%s] for the topic[%s] that contains %s"
-                                + " partitions b,ut the producer does not support for a partitioned topic.",
+                                + " partitions but the producer does not support for a partitioned topic.",
                         producerNameForLog, topic, metadata.partitions);
                 log.error(errorMsg);
                 checkPartitions.completeExceptionally(
                         new PulsarClientException.NotConnectedException(errorMsg));
             } else {
+                // 否则，完成 CompletableFuture 并返回分区数量
                 checkPartitions.complete(metadata.partitions);
             }
         }).exceptionally(ex -> {
+            // 处理异常情况
             Throwable actEx = FutureUtil.unwrapCompletionException(ex);
             if (forceNoPartitioned && actEx instanceof PulsarClientException.NotFoundException
                     || actEx instanceof PulsarClientException.TopicDoesNotExistException
                     || actEx instanceof PulsarAdminException.NotFoundException) {
+                // 如果主题不存在且强制不支持分区，返回 0
                 checkPartitions.complete(0);
             } else {
+                // 否则，抛出异常
                 checkPartitions.completeExceptionally(ex);
             }
             return null;
@@ -434,16 +503,17 @@ public class PulsarClientImpl implements PulsarClient {
                                                                    ProducerConfigurationData conf,
                                                                    Schema<T> schema,
                                                                    ProducerInterceptors interceptors) {
+        // 创建一个 CompletableFuture 对象，用于异步返回生产者
         CompletableFuture<Producer<T>> producerCreatedFuture = new CompletableFuture<>();
 
-
-
+        // 检查主题的分区信息
         checkPartitions(topic, conf.isNonPartitionedTopicExpected(), conf.getProducerName()).thenAccept(partitions -> {
             if (log.isDebugEnabled()) {
                 log.debug("[{}] Received topic metadata. partitions: {}", topic, partitions);
             }
 
             ProducerBase<T> producer;
+            // 根据分区数量创建相应的生产者
             if (partitions > 0) {
                 producer = newPartitionedProducerImpl(topic, conf, schema, interceptors, producerCreatedFuture,
                         partitions);
@@ -451,8 +521,10 @@ public class PulsarClientImpl implements PulsarClient {
                 producer = newProducerImpl(topic, -1, conf, schema, interceptors, producerCreatedFuture,
                         Optional.empty());
             }
+            // 将生产者添加到生产者集合中
             producers.add(producer);
         }).exceptionally(ex -> {
+            // 处理异常情况
             log.warn("[{}] Failed to get partitioned topic metadata: {}", topic, ex.getMessage());
             producerCreatedFuture.completeExceptionally(ex);
             return null;
@@ -1055,7 +1127,7 @@ public class PulsarClientImpl implements PulsarClient {
      */
     @VisibleForTesting
     public CompletableFuture<ClientCnx> getConnection(final String topic) {
-        return getConnection(topic, cnxPool.genRandomKeyToSelectCon()).thenApply(Pair::getLeft);
+        return getConnection(topic, cnxPool.genRandomKeyToSelectCon());
     }
 
     public CompletableFuture<ClientCnx> getConnection(final String topic, final String url) {
