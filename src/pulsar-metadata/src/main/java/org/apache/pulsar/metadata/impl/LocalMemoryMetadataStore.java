@@ -155,7 +155,7 @@ public class LocalMemoryMetadataStore extends AbstractMetadataStore implements M
 
     @Override
     public CompletableFuture<Stat> storePut(String path, byte[] data, Optional<Long> optExpectedVersion,
-                                            EnumSet<CreateOption> options) {
+            EnumSet<CreateOption> options) {
         if (!isValidPath(path)) {
             return FutureUtil.failedFuture(new MetadataStoreException.InvalidPathException(path));
         }
@@ -191,8 +191,8 @@ public class LocalMemoryMetadataStore extends AbstractMetadataStore implements M
                             options.contains(CreateOption.Ephemeral));
                     map.put(path, newValue);
 
-                    NotificationType type =
-                            existingValue == null ? NotificationType.Created : NotificationType.Modified;
+                    NotificationType type = existingValue == null ? NotificationType.Created
+                            : NotificationType.Modified;
                     receivedNotification(new Notification(type, path));
                     if (type == NotificationType.Created) {
                         notifyParentChildrenChanged(path);
@@ -255,7 +255,7 @@ class MemoryMetadataStoreProvider implements MetadataStoreProvider {
 
     @Override
     public MetadataStore create(String metadataURL, MetadataStoreConfig metadataStoreConfig,
-                                boolean enableSessionWatcher) throws MetadataStoreException {
+            boolean enableSessionWatcher) throws MetadataStoreException {
         return new LocalMemoryMetadataStore(metadataURL, metadataStoreConfig);
     }
 }
