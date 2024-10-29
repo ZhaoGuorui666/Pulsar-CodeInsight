@@ -10,18 +10,19 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Setup SSH agent
-        uses: webfactory/ssh-agent@v0.5.4
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Install sshpass
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sshpass
 
       - name: Add server to known_hosts
         run: ssh-keyscan -H 14.103.47.239 >> ~/.ssh/known_hosts
 
-      - name: List added SSH keys
-        run: ssh-add -l
-
       - name: Write log to server
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
         run: |
-          ssh -o StrictHostKeyChecking=no -vvv asapp@14.103.47.239 "echo 'New update pushed at $(date)' >> /home/asapp/githubTest/logfile.log"
-      
+          sshpass -p "$SSH_PASSWORD" ssh -o StrictHostKeyChecking=no asapp@14.103.47.239 "echo 'New update pushed at $(date)' >> /home/asapp/githubTest/logfile.log"
