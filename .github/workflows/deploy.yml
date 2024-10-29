@@ -18,6 +18,9 @@ jobs:
       - name: Add server to known_hosts
         run: ssh-keyscan -H 14.103.47.239 >> ~/.ssh/known_hosts
 
+        - name: List added SSH keys
+        run: ssh-add -l
+
       - name: Write log to server
         run: |
           ssh asapp@14.103.47.239 "echo 'New update pushed at $(date)' >> /home/asapp/githubTest/logfile.log"
