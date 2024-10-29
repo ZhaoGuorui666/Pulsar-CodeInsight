@@ -1,0 +1,23 @@
+name: Log to Server
+
+on:
+  push:
+    branches:
+      - master  # 替换为您要监控的分支
+
+jobs:
+  log:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Setup SSH agent
+        uses: webfactory/ssh-agent@v0.5.4
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add server to known_hosts
+        run: ssh-keyscan -H 14.103.47.239 >> ~/.ssh/known_hosts
+
+      - name: Write log to server
+        run: |
+          ssh asapp@14.103.47.239 "echo 'New update pushed at $(date)' >> /home/asapp/githubTest/logfile.log"

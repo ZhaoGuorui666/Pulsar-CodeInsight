@@ -12,5 +12,5 @@
 
 ## 进度
 ### Pulsar客户端
-参考文章链接：
+参考的文章链接：
 https://blog.csdn.net/linchonghui888/article/details/140496223
