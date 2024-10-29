@@ -1,28 +1,27 @@
-name: Log to Server
+name: Log Repository Updates to Server
 
 on:
   push:
     branches:
-      - master  # 替换为您要监控的分支
+      - master  # 监听主分支的推送事件，您可以根据需要调整
 
 jobs:
-  log:
+  log_to_server:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+    - name: Checkout Repository
+      uses: actions/checkout@v3
 
-      - name: Install sshpass
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y sshpass
+    - name: Install sshpass
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y sshpass
 
-      - name: Add server to known_hosts
-        run: ssh-keyscan -H 14.103.47.239 >> ~/.ssh/known_hosts
-
-      - name: Write log to server
-        env:
-          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
-        run: |
-          sshpass -p "$SSH_PASSWORD" ssh -o StrictHostKeyChecking=no asapp@14.103.47.239 "echo 'New update pushed at $(date)' >> /home/asapp/githubTest/logfile.log"
+    - name: Log Update to Server
+      env:
+        SERVER_HOST: ${{ secrets.SERVER_HOST }}
+        SERVER_USER: ${{ secrets.SERVER_USER }}
+        SERVER_PASSWORD: ${{ secrets.SERVER_PASSWORD }}
+      run: |
+        sshpass -p "$SERVER_PASSWORD" ssh -o StrictHostKeyChecking=no $SERVER_USER@$SERVER_HOST "echo 'Repository updated on $(date)' >> /path/to/your/logfile.log"
