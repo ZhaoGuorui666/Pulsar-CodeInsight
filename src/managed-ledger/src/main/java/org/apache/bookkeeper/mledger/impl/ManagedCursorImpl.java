@@ -757,8 +757,7 @@ public class ManagedCursorImpl implements ManagedCursor {
     private void recoveredCursor(Position position, Map<String, Long> properties,
             Map<String, String> cursorProperties,
             LedgerHandle recoveredFromCursorLedger) {
-        // if the position was at a ledger that didn't exist (since it will be deleted
-        // if it was previously empty),
+        // if the position was at a ledger that didn't exist (since it was previously empty),
         // we need to move to the next existing ledger
         if (position.getEntryId() == -1L && !ledger.ledgerExists(position.getLedgerId())) {
             Long nextExistingLedger = ledger.getNextValidLedger(position.getLedgerId());
@@ -2803,90 +2802,134 @@ public class ManagedCursorImpl implements ManagedCursor {
         }
     }
 
+    /**
+     * 将当前位置持久化到元数据存储（MetaStore）。
+     *
+     * @param cursorsLedgerId                        光标账本ID
+     * @param position                               要持久化的位置
+     * @param properties                             关联的属性映射
+     * @param callback                               持久化操作完成后的回调
+     * @param persistIndividualDeletedMessageRanges 是否持久化单独删除的消息范围
+     */
     private void persistPositionMetaStore(long cursorsLedgerId, Position position, Map<String, Long> properties,
             MetaStoreCallback<Void> callback, boolean persistIndividualDeletedMessageRanges) {
+        log.debug("Entering persistPositionMetaStore with cursorsLedgerId: {}, position: {}, properties: {}, persistIndividualDeletedMessageRanges: {}",
+                cursorsLedgerId, position, properties, persistIndividualDeletedMessageRanges);
+
+        // 如果光标状态为已关闭，立即执行失败回调并返回
         if (state == State.Closed) {
+            log.warn("Cannot persist position. Cursor {} is already closed.", name);
             ledger.getExecutor().execute(() -> callback.operationFailed(new MetaStoreException(
                     new CursorAlreadyClosedException(name + " cursor already closed"))));
             return;
         }
 
+        // 获取最后一次光标账本的状态
         final Stat lastCursorLedgerStat = cursorLedgerStat;
+        log.debug("Retrieved lastCursorLedgerStat: {}", lastCursorLedgerStat);
 
-        // When closing we store the last mark-delete position in the z-node itself, so
-        // we won't need the cursor ledger,
-        // hence we write it as -1. The cursor ledger is deleted once the z-node write
-        // is confirmed.
-        ManagedCursorInfo.Builder info = ManagedCursorInfo.newBuilder() //
-                .setCursorsLedgerId(cursorsLedgerId) //
-                .setMarkDeleteLedgerId(position.getLedgerId()) //
-                .setMarkDeleteEntryId(position.getEntryId()) //
-                .setLastActive(lastActive); //
+        // 在关闭时，我们将最后的mark-delete位置存储在z-node本身，
+        // 因此不再需要光标账本，因此将其写为-1。
+        // 一旦z-node写入被确认，光标账本将被删除。
+        ManagedCursorInfo.Builder info = ManagedCursorInfo.newBuilder()
+                .setCursorsLedgerId(cursorsLedgerId)
+                .setMarkDeleteLedgerId(position.getLedgerId())
+                .setMarkDeleteEntryId(position.getEntryId())
+                .setLastActive(lastActive);
 
+        // 添加属性映射到cursor信息中
         info.addAllProperties(buildPropertiesMap(properties));
         info.addAllCursorProperties(buildStringPropertiesMap(cursorProperties));
+        log.debug("Added properties and cursor properties to ManagedCursorInfo.");
+
+        // 如果需要持久化单独删除的消息范围，则添加相关信息
         if (persistIndividualDeletedMessageRanges) {
+            log.debug("Persisting individual deleted message ranges.");
             info.addAllIndividualDeletedMessages(buildIndividualDeletedMessageRanges());
             if (getConfig().isDeletionAtBatchIndexLevelEnabled()) {
+                log.debug("Deletion at batch index level is enabled. Adding batched entry deletion index info.");
                 info.addAllBatchedEntryDeletionIndexInfo(buildBatchEntryDeletionIndexInfoList());
             }
         }
 
+        // 如果日志级别为调试，记录调试信息
         if (log.isDebugEnabled()) {
-            log.debug("[{}][{}]  Closing cursor at md-position: {}", ledger.getName(), name, position);
+            log.debug("[{}][{}] Closing cursor at md-position: {}", ledger.getName(), name, position);
         }
 
+        // 构建最终的ManagedCursorInfo对象
         ManagedCursorInfo cursorInfo = info.build();
+        log.debug("Built ManagedCursorInfo: {}", cursorInfo);
+
+        // 异步更新光标信息到元数据存储
+        log.info("Starting asynchronous update of cursor info for cursor {}", name);
         ledger.getStore().asyncUpdateCursorInfo(ledger.getName(), name, cursorInfo, lastCursorLedgerStat,
                 new MetaStoreCallback<Void>() {
                     @Override
                     public void operationComplete(Void result, Stat stat) {
+                        log.debug("asyncUpdateCursorInfo operationComplete called for cursor {}", name);
+                        // 更新光标账本的统计信息
                         updateCursorLedgerStat(cursorInfo, stat);
+                        log.debug("Updated cursor ledger stats for cursor {}", name);
+                        // 执行成功回调
                         callback.operationComplete(result, stat);
+                        log.info("Successfully persisted position for cursor {}", name);
                     }
 
                     @Override
                     public void operationFailed(MetaStoreException topLevelException) {
+                        log.error("Failed to update cursor metadata for {}: {}", name, topLevelException.getMessage(), topLevelException);
+                        // 如果失败是由于版本冲突
                         if (topLevelException instanceof MetaStoreException.BadVersionException) {
-                            log.warn("[{}] Failed to update cursor metadata for {} due to version conflict {}",
-                                    ledger.name, name, topLevelException.getMessage());
-                            // it means previous owner of the ml might have updated the version incorrectly.
-                            // So, check
-                            // the ownership and refresh the version again.
+                            log.warn("[{}] Failed to update cursor metadata for {} due to version conflict.",
+                                    ledger.name, name);
+                            // 这意味着ml的前一个所有者可能错误地更新了版本。
+                            // 因此，检查所有权并再次刷新版本。
                             if (ledger.mlOwnershipChecker != null) {
+                                log.debug("Checking ownership for cursor {}.", name);
                                 ledger.mlOwnershipChecker.get().whenComplete((hasOwnership, t) -> {
-                                    if (t == null && hasOwnership) {
+                                    if (t != null) {
+                                        log.error("Ownership check failed for cursor {}: {}", name, t.getMessage(), t);
+                                        callback.operationFailed(topLevelException);
+                                        return;
+                                    }
+                                    if (hasOwnership) {
+                                        log.debug("Cursor {} has ownership. Refreshing cursor metadata.", name);
+                                        // 异步获取最新的光标信息
                                         ledger.getStore().asyncGetCursorInfo(ledger.getName(), name,
                                                 new MetaStoreCallback<>() {
                                                     @Override
                                                     public void operationComplete(ManagedCursorInfo info, Stat stat) {
+                                                        log.debug("Successfully refreshed cursor metadata for cursor {}", name);
+                                                        // 更新光标账本的统计信息
                                                         updateCursorLedgerStat(info, stat);
-                                                        // fail the top level call so that the caller can retry
+                                                        // 触发失败回调，以便调用者可以重试
                                                         callback.operationFailed(topLevelException);
                                                     }
 
                                                     @Override
                                                     public void operationFailed(MetaStoreException e) {
                                                         if (log.isDebugEnabled()) {
-                                                            log.debug(
-                                                                    "[{}] Failed to refresh cursor metadata-version "
-                                                                            + "for {} due to {}",
-                                                                    ledger.name, name,
-                                                                    e.getMessage());
+                                                            log.debug("[{}] Failed to refresh cursor metadata-version "
+                                                                    + "for {} due to {}", ledger.name, name, e.getMessage(), e);
                                                         }
-                                                        // fail the top level call so that the caller can retry
+                                                        // 触发失败回调，以便调用者可以重试
                                                         callback.operationFailed(topLevelException);
                                                     }
                                                 });
                                     } else {
-                                        // fail the top level call so that the caller can retry
+                                        log.warn("Cursor {} does not have ownership. Cannot refresh metadata.", name);
+                                        // 触发失败回调，以便调用者可以重试
                                         callback.operationFailed(topLevelException);
                                     }
                                 });
                             } else {
+                                log.warn("mlOwnershipChecker is null for cursor {}. Cannot refresh metadata.", name);
+                                // 触发失败回调，以便调用者可以重试
                                 callback.operationFailed(topLevelException);
                             }
                         } else {
+                            // 对于其他类型的失败，直接触发失败回调
                             callback.operationFailed(topLevelException);
                         }
                     }
@@ -3317,8 +3360,8 @@ public class ManagedCursorImpl implements ManagedCursor {
         return false;
     }
 
-    boolean rolloverLedgerIfNeeded(LedgerHandle lh1) {
-        if (shouldCloseLedger(lh1)) {
+    boolean rolloverLedgerIfNeeded(LedgerHandle lh) {
+        if (shouldCloseLedger(lh)) {
             if (log.isDebugEnabled()) {
                 log.debug("[{}] Need to create new metadata ledger for cursor {}", ledger.getName(), name);
             }
@@ -3338,7 +3381,7 @@ public class ManagedCursorImpl implements ManagedCursor {
             public void operationComplete(Void result, Stat stat) {
                 if (log.isDebugEnabled()) {
                     log.debug(
-                            "[{}][{}] Updated cursor in meta store after previous failure in ledger at position"
+                            "[{}][{}] Updated cursor in meta store after previous failure in ledger"
                                     + " {}",
                             ledger.getName(), name, newPosition);
                 }
@@ -3650,6 +3693,140 @@ public class ManagedCursorImpl implements ManagedCursor {
         } else {
             return null;
         }
+    }
+
+    /**
+     * 将当前位置持久化到元数据存储（MetaStore）。
+     *
+     * @param cursorsLedgerId                        光标账本ID
+     * @param position                               要持久化的位置
+     * @param properties                             关联的属性映射
+     * @param callback                               持久化操作完成后的回调
+     * @param persistIndividualDeletedMessageRanges 是否持久化单独删除的消息范围
+     */
+    private void persistPositionMetaStore(long cursorsLedgerId, Position position, Map<String, Long> properties,
+            MetaStoreCallback<Void> callback, boolean persistIndividualDeletedMessageRanges) {
+        log.debug("Entering persistPositionMetaStore with cursorsLedgerId: {}, position: {}, properties: {}, persistIndividualDeletedMessageRanges: {}",
+                cursorsLedgerId, position, properties, persistIndividualDeletedMessageRanges);
+
+        // 如果光标状态为已关闭，立即执行失败回调并返回
+        if (state == State.Closed) {
+            log.warn("Cannot persist position. Cursor {} is already closed.", name);
+            ledger.getExecutor().execute(() -> callback.operationFailed(new MetaStoreException(
+                    new CursorAlreadyClosedException(name + " cursor already closed"))));
+            return;
+        }
+
+        // 获取最后一次光标账本的状态
+        final Stat lastCursorLedgerStat = cursorLedgerStat;
+        log.debug("Retrieved lastCursorLedgerStat: {}", lastCursorLedgerStat);
+
+        // 在关闭时，我们将最后的mark-delete位置存储在z-node本身，
+        // 因此不再需要光标账本，因此将其写为-1。
+        // 一旦z-node写入被确认，光标账本将被删除。
+        ManagedCursorInfo.Builder info = ManagedCursorInfo.newBuilder()
+                .setCursorsLedgerId(cursorsLedgerId)
+                .setMarkDeleteLedgerId(position.getLedgerId())
+                .setMarkDeleteEntryId(position.getEntryId())
+                .setLastActive(lastActive);
+
+        // 添加属性映射到cursor信息中
+        info.addAllProperties(buildPropertiesMap(properties));
+        info.addAllCursorProperties(buildStringPropertiesMap(cursorProperties));
+        log.debug("Added properties and cursor properties to ManagedCursorInfo.");
+
+        // 如果需要持久化单独删除的消息范围，则添加相关信息
+        if (persistIndividualDeletedMessageRanges) {
+            log.debug("Persisting individual deleted message ranges.");
+            info.addAllIndividualDeletedMessages(buildIndividualDeletedMessageRanges());
+            if (getConfig().isDeletionAtBatchIndexLevelEnabled()) {
+                log.debug("Deletion at batch index level is enabled. Adding batched entry deletion index info.");
+                info.addAllBatchedEntryDeletionIndexInfo(buildBatchEntryDeletionIndexInfoList());
+            }
+        }
+
+        // 如果日志级别为调试，记录调试信息
+        if (log.isDebugEnabled()) {
+            log.debug("[{}][{}] Closing cursor at md-position: {}", ledger.getName(), name, position);
+        }
+
+        // 构建最终的ManagedCursorInfo对象
+        ManagedCursorInfo cursorInfo = info.build();
+        log.debug("Built ManagedCursorInfo: {}", cursorInfo);
+
+        // 异步更新光标信息到元数据存储
+        log.info("Starting asynchronous update of cursor info for cursor {}", name);
+        ledger.getStore().asyncUpdateCursorInfo(ledger.getName(), name, cursorInfo, lastCursorLedgerStat,
+                new MetaStoreCallback<Void>() {
+                    @Override
+                    public void operationComplete(Void result, Stat stat) {
+                        log.debug("asyncUpdateCursorInfo operationComplete called for cursor {}", name);
+                        // 更新光标账本的统计信息
+                        updateCursorLedgerStat(cursorInfo, stat);
+                        log.debug("Updated cursor ledger stats for cursor {}", name);
+                        // 执行成功回调
+                        callback.operationComplete(result, stat);
+                        log.info("Successfully persisted position for cursor {}", name);
+                    }
+
+                    @Override
+                    public void operationFailed(MetaStoreException topLevelException) {
+                        log.error("Failed to update cursor metadata for {}: {}", name, topLevelException.getMessage(), topLevelException);
+                        // 如果失败是由于版本冲突
+                        if (topLevelException instanceof MetaStoreException.BadVersionException) {
+                            log.warn("[{}] Failed to update cursor metadata for {} due to version conflict.",
+                                    ledger.name, name);
+                            // 这意味着ml的前一个所有者可能错误地更新了版本。
+                            // 因此，检查所有权并再次刷新版本。
+                            if (ledger.mlOwnershipChecker != null) {
+                                log.debug("Checking ownership for cursor {}.", name);
+                                ledger.mlOwnershipChecker.get().whenComplete((hasOwnership, t) -> {
+                                    if (t != null) {
+                                        log.error("Ownership check failed for cursor {}: {}", name, t.getMessage(), t);
+                                        callback.operationFailed(topLevelException);
+                                        return;
+                                    }
+                                    if (hasOwnership) {
+                                        log.debug("Cursor {} has ownership. Refreshing cursor metadata.", name);
+                                        // 异步获取最新的光标信息
+                                        ledger.getStore().asyncGetCursorInfo(ledger.getName(), name,
+                                                new MetaStoreCallback<>() {
+                                                    @Override
+                                                    public void operationComplete(ManagedCursorInfo info, Stat stat) {
+                                                        log.debug("Successfully refreshed cursor metadata for cursor {}", name);
+                                                        // 更新光标账本的统计信息
+                                                        updateCursorLedgerStat(info, stat);
+                                                        // 触发失败回调，以便调用者可以重试
+                                                        callback.operationFailed(topLevelException);
+                                                    }
+
+                                                    @Override
+                                                    public void operationFailed(MetaStoreException e) {
+                                                        if (log.isDebugEnabled()) {
+                                                            log.debug("[{}] Failed to refresh cursor metadata-version "
+                                                                    + "for {} due to {}", ledger.name, name, e.getMessage(), e);
+                                                        }
+                                                        // 触发失败回调，以便调用者可以重试
+                                                        callback.operationFailed(topLevelException);
+                                                    }
+                                                });
+                                    } else {
+                                        log.warn("Cursor {} does not have ownership. Cannot refresh metadata.", name);
+                                        // 触发失败回调，以便调用者可以重试
+                                        callback.operationFailed(topLevelException);
+                                    }
+                                });
+                            } else {
+                                log.warn("mlOwnershipChecker is null for cursor {}. Cannot refresh metadata.", name);
+                                // 触发失败回调，以便调用者可以重试
+                                callback.operationFailed(topLevelException);
+                            }
+                        } else {
+                            // 对于其他类型的失败，直接触发失败回调
+                            callback.operationFailed(topLevelException);
+                        }
+                    }
+                });
     }
 
     /**
