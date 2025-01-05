@@ -290,26 +290,25 @@ public class ConnectionPool implements AutoCloseable {
         }
 
         final CompletableFuture<ClientCnx> cnxFuture = new CompletableFuture<>();
-        // Trigger async connect to broker
+        // 触发异步连接到broker
         createConnection(key.logicalAddress, key.physicalAddress).thenAccept(channel -> {
             log.info("[{}] Connected to server", channel);
 
             channel.closeFuture().addListener(v -> {
-                // Remove connection from pool when it gets closed
+                // 当连接关闭时从连接池中移除
                 if (log.isDebugEnabled()) {
-                    log.debug("Removing closed connection from pool: {}", v);
+                    log.debug("从连接池移除已关闭的连接: {}", v);
                 }
                 pool.remove(key, cnxFuture);
             });
 
-            // We are connected to broker, but need to wait until the connect/connected handshake is
-            // complete
+            // 已连接到broker,但需要等待connect/connected握手完成
             final ClientCnx cnx = (ClientCnx) channel.pipeline().get("handler");
             if (!channel.isActive() || cnx == null) {
                 if (log.isDebugEnabled()) {
-                    log.debug("[{}] Connection was already closed by the time we got notified", channel);
+                    log.debug("[{}] 连接在通知时已关闭", channel);
                 }
-                cnxFuture.completeExceptionally(new ChannelException("Connection already closed"));
+                cnxFuture.completeExceptionally(new ChannelException("连接已关闭"));
                 return;
             }
 
